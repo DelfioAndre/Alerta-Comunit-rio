@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Alerta Comunitário Nampula | Sistema Multi‑Departamento</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        @keyframes blink-red {
+            0%, 100% { opacity: 1; background-color: rgba(220, 38, 38, 0.3); border-left-color: #ef4444; }
+            50% { opacity: 0.8; background-color: rgba(220, 38, 38, 0.6); border-left-color: #ff8888; }
+        }
+        @keyframes pulse-map {
+            0% { transform: scale(0.8); opacity: 1; }
+            70% { transform: scale(1.3); opacity: 0.5; }
+            100% { transform: scale(0.8); opacity: 1; }
+        }
+        .emergency-card { animation: slideIn 0.3s ease-out; }
+        .urgent-pulse { animation: blink-red 0.8s ease-in-out infinite; }
+        .u8g2-screen {
+            background: #0a0f1e;
+            background-image: radial-gradient(circle at 2px 2px, #00ffcc15 1px, transparent 1px);
+            background-size: 12px 12px;
+            font-family: 'Courier New', monospace;
+        }
+        .status-led { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .blink-fast { animation: blink 0.5s step-start infinite; }
+        @keyframes blink { 50% { opacity: 0.3; } }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .tab-btn { transition: all 0.2s ease; }
+        .tab-active { border-bottom: 3px solid #3b82f6; color: #60a5fa; background: rgba(59,130,246,0.1); }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #3b82f6; border-radius: 5px; }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-gray-950 to-gray-900 text-gray-100 font-sans">
+
+    <!-- HEADER -->
+    <div class="bg-black/80 backdrop-blur-md border-b border-blue-900/50 px-5 py-2.5 flex flex-wrap justify-between items-center sticky top-0 z-30">
+        <div class="flex items-center gap-3">
+            <i class="fas fa-shield-alt text-blue-500 text-2xl"></i>
+            <span class="font-black text-lg tracking-tight">ALERTA COMUNITÁRIO · <span class="text-cyan-400">NAMPULA</span></span>
+            <div class="hidden md:flex gap-2 ml-3 text-[10px] bg-gray-800/80 px-3 py-1 rounded-full">
+                <span><span class="status-led bg-green-500 blink-fast"></span>ESP-1 (TX)</span>
+                <span><span class="status-led bg-blue-400"></span>ESP-2 (RX/U8G2)</span>
+            </div>
+        </div>
+        <div class="flex gap-3 items-center text-xs">
+            <i class="fas fa-firebase text-yellow-500"></i>
+            <span id="firebase-status" class="text-yellow-400 bg-yellow-950/40 px-2 py-0.5 rounded-full">⏳ Conectando...</span>
+            <span id="relogio" class="font-mono bg-gray-900/70 px-3 py-1 rounded-lg">--:--:--</span>
+        </div>
+    </div>
+
+    <!-- NAVEGAÇÃO POR ABAS -->
+    <nav class="bg-gray-900/80 border-b border-gray-800 px-4 flex overflow-x-auto gap-1 sticky top-[57px] z-20 backdrop-blur-sm">
+        <button data-tab="dashboard" class="tab-btn py-3 px-4 text-sm font-medium transition-all border-b-2 border-transparent hover:text-blue-400 whitespace-nowrap"><i class="fas fa-tachometer-alt mr-1"></i> DASHBOARD</button>
+        <button data-tab="policia" class="tab-btn py-3 px-4 text-sm font-medium transition-all border-b-2 border-transparent hover:text-red-400 whitespace-nowrap"><i class="fas fa-shield-alt mr-1 text-red-400"></i> POLÍCIA</button>
+        <button data-tab="bombeiros" class="tab-btn py-3 px-4 text-sm font-medium transition-all border-b-2 border-transparent hover:text-orange-400 whitespace-nowrap"><i class="fas fa-fire-extinguisher mr-1 text-orange-400"></i> BOMBEIROS</button>
+        <button data-tab="samu" class="tab-btn py-3 px-4 text-sm font-medium transition-all border-b-2 border-transparent hover:text-yellow-400 whitespace-nowrap"><i class="fas fa-ambulance mr-1 text-yellow-400"></i> SAMU</button>
+        <button data-tab="comunidade" class="tab-btn py-3 px-4 text-sm font-medium transition-all border-b-2 border-transparent hover:text-green-400 whitespace-nowrap"><i class="fas fa-users mr-1 text-green-400"></i> COMUNIDADE</button>
+    </nav>
+
+    <main id="main-content" class="p-4 h-[calc(100vh-110px)] overflow-y-auto"></main>
+
+    <script type="module">
+        // ==================== IMPORTAÇÃO FIREBASE ====================
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getDatabase, ref, push, onChildAdded, update, serverTimestamp, remove, query, orderByChild, limitToLast } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyD7c8Vw9h4LqYrdS8lKoHs_asmH-yqGp4Y",
+            authDomain: "community-help-from-npl.firebaseapp.com",
+            projectId: "community-help-from-npl",
+            storageBucket: "community-help-from-npl.firebasestorage.app",
+            messagingSenderId: "865163765838",
+            appId: "1:865163765838:web:0a6218a2cde9f7473e3b1f"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+        console.log("Firebase inicializado");
+
+        // ==================== VARIÁVEIS GLOBAIS ====================
+        let alertasAtivos = [];      // { id, tipo, local, timestamp, status, comunidade, atendidoPor, lat, lng, firebaseKey }
+        let contadores = { roubo: 0, incendio: 0, acidente: 0 };
+        let currentTab = "dashboard";
+        let mapNampula = null;
+        let markersAtuais = [];
+        let firebaseKeysSet = new Set();   // evitar duplicação de alertas do Firebase
+        let escutaAtiva = false;
+
+        // Pontos reais de Nampula
+        const pontosNampula = {
+            roubo: [
+                { nome: "Mercado Central", lat: -15.1195, lng: 39.2645 },
+                { nome: "Rua dos Continuadores", lat: -15.1180, lng: 39.2680 },
+                { nome: "Namutequeliua", lat: -15.1250, lng: 39.2550 },
+                { nome: "Estrada de Monapo", lat: -15.1080, lng: 39.2800 }
+            ],
+            incendio: [
+                { nome: "Feira Popular", lat: -15.1220, lng: 39.2620 },
+                { nome: "Edifício Mutuáli", lat: -15.1145, lng: 39.2590 },
+                { nome: "Parque 3 de Fevereiro", lat: -15.1100, lng: 39.2700 }
+            ],
+            acidente: [
+                { nome: "Rotunda do Aeroporto", lat: -15.1055, lng: 39.2820 },
+                { nome: "Cruzamento INSS", lat: -15.1155, lng: 39.2600 },
+                { nome: "Avenida Eduardo Mondlane", lat: -15.1175, lng: 39.2675 }
+            ]
+        };
+
+        function obterLocalAleatorioComCoordenadas(tipo) {
+            const lista = pontosNampula[tipo] || pontosNampula.roubo;
+            const ponto = lista[Math.floor(Math.random() * lista.length)];
+            return { nome: ponto.nome + ", Nampula", lat: ponto.lat, lng: ponto.lng };
+        }
+
+        // ==================== FUNÇÕES DO MAPA (CORRIGIDAS) ====================
+        function destruirMapa() {
+            if (mapNampula) {
+                mapNampula.remove();
+                mapNampula = null;
+            }
+            markersAtuais = [];
+        }
+
+        function initMapa() {
+            const mapDiv = document.getElementById('mapa-nampula');
+            if (!mapDiv) return;
+            destruirMapa();  // garante que não haja mapa órfão
+            mapNampula = L.map('mapa-nampula').setView([-15.1167, 39.2667], 13);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '© Nampula MZ'
+            }).addTo(mapNampula);
+            L.marker([-15.1167, 39.2667]).addTo(mapNampula).bindPopup("📍 Centro Nampula");
+        }
+
+        function adicionarMarcadorAlerta(tipo, localNome, lat, lng, comunidade = null) {
+            if (!mapNampula) initMapa();
+            if (!mapNampula) return;
+            const cor = tipo === 'roubo' ? '#ef4444' : (tipo === 'incendio' ? '#f97316' : '#eab308');
+            const icone = tipo === 'roubo' ? 'fa-mask' : (tipo === 'incendio' ? 'fa-fire' : 'fa-car-crash');
+            const customIcon = L.divIcon({
+                html: `<div style="background:${cor}; width:32px; height:32px; border-radius:50%; border:3px solid white; display:flex; align-items:center; justify-content:center; animation:pulse-map 1s infinite;">
+                        <i class="fas ${icone}" style="color:white; font-size:14px;"></i></div>`,
+                iconSize: [32, 32],
+                className: 'bg-transparent'
+            });
+            const marker = L.marker([lat, lng], { icon: customIcon }).addTo(mapNampula);
+            marker.bindPopup(`<b style="color:${cor}">${tipo.toUpperCase()}</b><br>${localNome}${comunidade ? `<br><i class="fas fa-users"></i> ${comunidade}` : ''}`);
+            markersAtuais.push(marker);
+            if (markersAtuais.length > 12) {
+                mapNampula.removeLayer(markersAtuais.shift());
+            }
+            mapNampula.setView([lat, lng], 14);
+        }
+
+        // ==================== DISPLAY U8G2 SIMULADO ====================
+        function atualizarU8G2Display() {
+            const pendentes = alertasAtivos.filter(a => a.status === 'pendente');
+            const line1 = document.getElementById('u8g2-line1');
+            const line2 = document.getElementById('u8g2-line2');
+            const line3 = document.getElementById('u8g2-line3');
+            const buzzer = document.getElementById('buzzer-status');
+            if (!line1) return;
+            if (pendentes.length === 0) {
+                line1.innerHTML = "[U8G2] SISTEMA OK ✓";
+                line2.innerHTML = "AGUARDANDO ALERTAS";
+                line3.innerHTML = "🟢 Comunidade ativa | Nampula";
+                if (buzzer) { buzzer.innerHTML = "OFF"; buzzer.classList.remove("text-red-400", "blink-fast"); }
+                return;
+            }
+            const ultimo = pendentes[0];
+            line1.innerHTML = `🚨 ${ultimo.tipo.toUpperCase()} 🚨`;
+            line2.innerHTML = `${ultimo.local.substring(0, 22)}`;
+            line3.innerHTML = `${pendentes.length} alerta(s) | ${ultimo.comunidade || 'Geral'}`;
+            if (buzzer) { buzzer.innerHTML = "🔔 ATIVO!"; buzzer.classList.add("text-red-400", "blink-fast"); }
+            try { new Audio('data:audio/wav;base64,U3RlYWx0aCBzb3VuZA==').play().catch(e=>{}); } catch(e) {}
+        }
+
+        // ==================== CRIAÇÃO DE ALERTA (LOCAL + FIREBASE) ====================
+        async function criarAlerta(tipo, origem = "ESP", comunidade = null) {
+            const { nome, lat, lng } = obterLocalAleatorioComCoordenadas(tipo);
+            const localFinal = comunidade ? `${comunidade} - ${nome}` : nome;
+            const novoAlerta = {
+                tipo: tipo,
+                local: localFinal,
+                timestamp: new Date().toISOString(),
+                status: "pendente",
+                origem: origem,
+                comunidade: comunidade,
+                lat: lat,
+                lng: lng
+            };
+
+            let firebaseKey = null;
+            try {
+                const alertasRef = ref(database, 'alertas');
+                const newRef = await push(alertasRef, {
+                    ...novoAlerta,
+                    timestamp_server: serverTimestamp()
+                });
+                firebaseKey = newRef.key;
+                firebaseKeysSet.add(firebaseKey);
+                console.log("✅ Alerta salvo no Firebase:", firebaseKey);
+            } catch (e) { console.error("Erro Firebase:", e); }
+
+            const alertaCompleto = {
+                id: Date.now() + Math.random(),
+                ...novoAlerta,
+                timestamp: new Date(),
+                firebaseKey: firebaseKey
+            };
+            alertasAtivos.unshift(alertaCompleto);
+            contadores[tipo]++;
+            adicionarMarcadorAlerta(tipo, localFinal, lat, lng, comunidade);
+            atualizarTodosOsComponentes();
+            atualizarU8G2Display();
+            return alertaCompleto;
+        }
+
+        // ==================== ATENDIMENTO DE ALERTA ====================
+        async function atenderAlerta(id, departamento) {
+            const alerta = alertasAtivos.find(a => a.id == id);
+            if (!alerta || alerta.status !== 'pendente') return;
+
+            alerta.status = 'atendido';
+            alerta.atendidoPor = departamento;
+            contadores[alerta.tipo] = Math.max(0, contadores[alerta.tipo] - 1);
+
+            if (alerta.firebaseKey && database) {
+                try {
+                    const alertaRef = ref(database, `alertas/${alerta.firebaseKey}`);
+                    await update(alertaRef, {
+                        status: 'atendido',
+                        atendidoPor: departamento,
+                        atendidoEm: serverTimestamp()
+                    });
+                } catch (e) { console.error("Erro ao atualizar Firebase:", e); }
+            }
+            atualizarTodosOsComponentes();
+            atualizarU8G2Display();
+        }
+
+        function atenderPorDepartamento(tipo, nomeDepto) {
+            const pendentes = alertasAtivos.filter(a => a.tipo === tipo && a.status === 'pendente');
+            pendentes.forEach(a => atenderAlerta(a.id, nomeDepto));
+        }
+
+        // ==================== ESCUTA DO FIREBASE (APENAS NOVOS ALERTAS) ====================
+        function iniciarEscutaFirebase() {
+            if (escutaAtiva) return;
+            escutaAtiva = true;
+            const alertasRef = query(ref(database, 'alertas'), orderByChild('timestamp'), limitToLast(50));
+            onChildAdded(alertasRef, (snapshot) => {
+                const alertaFire = snapshot.val();
+                const key = snapshot.key;
+                if (!alertaFire || alertaFire.status !== 'pendente') return;
+                if (firebaseKeysSet.has(key)) return;
+                // Evita adicionar alertas já existentes localmente
+                const existe = alertasAtivos.some(a => a.firebaseKey === key);
+                if (existe) return;
+
+                firebaseKeysSet.add(key);
+                const { lat, lng } = obterLocalAleatorioComCoordenadas(alertaFire.tipo);
+                const novoLocal = {
+                    id: Date.now() + Math.random(),
+                    tipo: alertaFire.tipo,
+                    local: alertaFire.local,
+                    timestamp: new Date(alertaFire.timestamp || Date.now()),
+                    status: alertaFire.status,
+                    origem: alertaFire.origem || 'Firebase',
+                    comunidade: alertaFire.comunidade,
+                    firebaseKey: key,
+                    lat: alertaFire.lat || lat,
+                    lng: alertaFire.lng || lng
+                };
+                alertasAtivos.unshift(novoLocal);
+                contadores[novoLocal.tipo]++;
+                adicionarMarcadorAlerta(novoLocal.tipo, novoLocal.local, novoLocal.lat, novoLocal.lng, novoLocal.comunidade);
+                atualizarTodosOsComponentes();
+                atualizarU8G2Display();
+            });
+        }
+
+        // ==================== ATUALIZAÇÃO DE INTERFACE ====================
+        function atualizarTodosOsComponentes() {
+            const statRoubo = document.getElementById('stat-roubo');
+            if (statRoubo) statRoubo.innerText = contadores.roubo;
+            const statIncendio = document.getElementById('stat-incendio');
+            if (statIncendio) statIncendio.innerText = contadores.incendio;
+            const statAcidente = document.getElementById('stat-acidente');
+            if (statAcidente) statAcidente.innerText = contadores.acidente;
+
+            if (currentTab === 'dashboard') {
+                const container = document.getElementById('dashboard-alertas-list');
+                if (container) {
+                    const pendentes = alertasAtivos.filter(a => a.status === 'pendente');
+                    if (pendentes.length === 0) container.innerHTML = '<p class="text-gray-500 text-center text-sm">Nenhum alerta ativo</p>';
+                    else {
+                        container.innerHTML = pendentes.map(a => `
+                            <div class="bg-gray-700/50 p-2 rounded-lg border-l-4 ${a.tipo==='roubo'?'border-red-500':a.tipo==='incendio'?'border-orange-500':'border-yellow-500'}">
+                                <div class="flex justify-between"><span class="font-bold text-xs">${a.tipo.toUpperCase()}</span><span class="text-[10px]">${new Date(a.timestamp).toLocaleTimeString()}</span></div>
+                                <div class="text-xs">${a.local}</div>
+                                ${a.comunidade ? `<div class="text-[10px] text-cyan-400"><i class="fas fa-users"></i> ${a.comunidade}</div>` : ''}
+                                <button onclick="window.atenderAlerta(${JSON.stringify(a.id).replace(/"/g, '&quot;')}, 'Dashboard')" class="text-[10px] bg-blue-700 px-2 py-0.5 rounded mt-1">Atender</button>
+                            </div>
+                        `).join('');
+                    }
+                }
+            }
+        }
+
+        function resetarSistemaGeral() {
+            alertasAtivos = [];
+            contadores = { roubo: 0, incendio: 0, acidente: 0 };
+            firebaseKeysSet.clear();
+            destruirMapa();
+            if (currentTab === 'dashboard') {
+                const container = document.getElementById('dashboard-alertas-list');
+                if (container) container.innerHTML = '<p class="text-gray-500 text-center text-sm">Nenhum alerta ativo</p>';
+            }
+            atualizarU8G2Display();
+            const feedDiv = document.getElementById('feed-comunidade');
+            if (feedDiv) feedDiv.innerHTML = '<p class="text-green-300 text-xs"><i class="fas fa-sync-alt"></i> Sistema resetado localmente. (Firebase mantém histórico)</p>';
+        }
+
+        async function limparFirebaseAlertas() {
+            if (!confirm("⚠️ Isso apagará TODOS os alertas do Firebase (incluindo históricos). Continuar?")) return;
+            try {
+                const alertasRef = ref(database, 'alertas');
+                await remove(alertasRef);
+                alert("✅ Todos os alertas removidos do Firebase!");
+                resetarSistemaGeral();
+            } catch (e) {
+                console.error(e);
+                alert("Erro ao limpar Firebase: " + e.message);
+            }
+        }
+
+        // ==================== FEED COMUNIDADE ====================
+        function adicionarMensagemComunidadeFeed(msg) {
+            const feedDiv = document.getElementById('feed-comunidade');
+            if (!feedDiv) return;
+            const p = document.createElement('p');
+            p.className = "text-cyan-300 border-b border-cyan-800/40 py-1 text-[11px]";
+            p.innerHTML = `<i class="fas fa-bell"></i> ${msg} <span class="text-[9px] text-gray-400">${new Date().toLocaleTimeString()}</span>`;
+            feedDiv.prepend(p);
+            if (feedDiv.children.length > 8) feedDiv.removeChild(feedDiv.lastChild);
+        }
+
+        function enviarAlertaComunidade(tipo) {
+            const select = document.getElementById('comunidade-select');
+            const comunidade = select ? select.value : "Comunidade";
+            criarAlerta(tipo, "Comunidade", comunidade);
+            adicionarMensagemComunidadeFeed(`🚨 NOVO ALERTA na ${comunidade}: ${tipo.toUpperCase()}`);
+        }
+
+        // ==================== RENDERIZAÇÃO DAS ABAS ====================
+        function renderDashboard() {
+            const pendentes = alertasAtivos.filter(a => a.status === 'pendente');
+            return `
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                    <div class="lg:col-span-3 space-y-4">
+                        <div class="bg-gray-900 rounded-2xl border border-gray-800 p-5">
+                            <h2 class="text-xs font-bold text-blue-400"><i class="fas fa-microchip"></i> ESP32 #01 · BOTÕES</h2>
+                            <div class="grid gap-3 mt-3">
+                                <button onclick="window.enviarAlerta('roubo')" class="bg-red-900/80 hover:bg-red-800 p-3 rounded-xl"><i class="fas fa-mask"></i> ROUBO</button>
+                                <button onclick="window.enviarAlerta('incendio')" class="bg-orange-900/80 hover:bg-orange-800 p-3 rounded-xl"><i class="fas fa-fire"></i> INCÊNDIO</button>
+                                <button onclick="window.enviarAlerta('acidente')" class="bg-yellow-800/80 hover:bg-yellow-700 p-3 rounded-xl"><i class="fas fa-car-crash"></i> ACIDENTE</button>
+                            </div>
+                            <div class="mt-3 text-[10px] text-gray-400">⚡ Firebase em tempo real</div>
+                            <button onclick="window.limparFirebaseAlertas()" class="mt-3 w-full text-[10px] bg-red-800/50 hover:bg-red-700 py-1 rounded">🗑️ Limpar Firebase</button>
+                        </div>
+                        <div class="bg-black rounded-2xl border border-cyan-800/60 p-4 u8g2-screen">
+                            <div class="flex items-center gap-2"><i class="fas fa-display text-cyan-400"></i><span class="text-cyan-300 text-[11px] font-mono">U8G2 OLED (ESP32 #02)</span></div>
+                            <div id="u8g2-line1" class="bg-gray-950 text-cyan-300 font-mono text-sm p-2 rounded border border-cyan-900 mt-2">[SYS] ARMADO ✓</div>
+                            <div id="u8g2-line2" class="bg-gray-950 text-cyan-300 font-mono text-sm p-2 rounded border border-cyan-900 mt-1">AGUARDANDO</div>
+                            <div id="u8g2-line3" class="bg-gray-950 text-cyan-300 font-mono text-[11px] p-1.5 rounded border border-cyan-900/50">🟢 Modo vigilância</div>
+                            <div class="mt-2 flex justify-between text-[10px]"><span><i class="fas fa-bell"></i> BUZZER:</span><span id="buzzer-status" class="text-gray-400">OFF</span></div>
+                        </div>
+                    </div>
+                    <div class="lg:col-span-6 space-y-4">
+                        <div id="mapa-nampula" class="bg-gray-800 rounded-2xl border border-gray-700" style="height: 320px;"></div>
+                        <div class="bg-gray-800/50 rounded-xl p-3">
+                            <h3 class="text-sm font-bold">📋 Alertas Ativos (${pendentes.length})</h3>
+                            <div id="dashboard-alertas-list" class="space-y-2 max-h-48 overflow-y-auto mt-2"></div>
+                        </div>
+                    </div>
+                    <div class="lg:col-span-3 space-y-4">
+                        <div class="bg-gray-900 rounded-2xl p-4 border border-gray-800">
+                            <h3 class="font-bold text-sm">📊 Estatísticas</h3>
+                            <div class="grid grid-cols-3 gap-2 text-center mt-3">
+                                <div><span id="stat-roubo" class="text-red-400 text-2xl font-bold">${contadores.roubo}</span><p class="text-[10px]">Roubo</p></div>
+                                <div><span id="stat-incendio" class="text-orange-400 text-2xl font-bold">${contadores.incendio}</span><p class="text-[10px]">Incêndio</p></div>
+                                <div><span id="stat-acidente" class="text-yellow-400 text-2xl font-bold">${contadores.acidente}</span><p class="text-[10px]">Acidente</p></div>
+                            </div>
+                        </div>
+                        <button onclick="window.resetarSistemaGeral()" class="w-full bg-gray-800 hover:bg-red-900 py-2 rounded-lg text-sm">Resetar (Local)</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderDepartamento(tipo, titulo, icone, cor, corBg) {
+            const pendentes = alertasAtivos.filter(a => a.tipo === tipo && a.status === 'pendente');
+            const corClass = cor;
+            return `
+                <div class="max-w-5xl mx-auto">
+                    <div class="bg-gradient-to-r ${corBg} rounded-2xl p-6 mb-5">
+                        <div class="flex items-center gap-4"><i class="${icone} text-4xl"></i><h1 class="text-2xl font-bold">${titulo}</h1><span class="ml-auto bg-black/50 px-3 py-1 rounded-full text-sm">${pendentes.length} pendente(s)</span></div>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <div class="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                            <h2 class="text-lg font-bold text-${corClass}-400 mb-3"><i class="fas fa-bell"></i> NOVOS CHAMADOS</h2>
+                            ${pendentes.length === 0 ? '<p class="text-gray-500 text-center py-8">Nenhum chamado pendente 🎉</p>' : pendentes.map(a => `
+                                <div class="bg-gray-800/70 p-3 rounded-xl mb-3 border-l-4 border-${corClass}-500">
+                                    <p class="font-bold">${a.local}</p>
+                                    <p class="text-xs text-gray-400">${new Date(a.timestamp).toLocaleString()}</p>
+                                    ${a.comunidade ? `<p class="text-xs text-cyan-400"><i class="fas fa-users"></i> ${a.comunidade}</p>` : ''}
+                                    <button onclick="window.atenderAlerta(${JSON.stringify(a.id).replace(/"/g, '&quot;')}, '${titulo}')" class="mt-2 bg-${corClass}-700 hover:bg-${corClass}-600 px-4 py-1 rounded text-sm">ACEITAR OCORRÊNCIA</button>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                            <h2 class="text-lg font-bold text-blue-400 mb-3"><i class="fas fa-check-circle"></i> AÇÕES RÁPIDAS</h2>
+                            <button onclick="window.atenderPorDepartamento('${tipo}', '${titulo}')" class="w-full bg-${corClass}-800 hover:bg-${corClass}-700 py-3 rounded-xl mb-4">ATENDER TODOS</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderComunidade() {
+            const alertasComunidade = alertasAtivos.filter(a => a.comunidade && a.status === 'pendente');
+            return `
+                <div class="max-w-5xl mx-auto">
+                    <div class="bg-gradient-to-r from-green-900 to-green-800 rounded-2xl p-6 mb-5">
+                        <div class="flex items-center gap-3"><i class="fas fa-users text-3xl"></i><h1 class="text-2xl font-bold">ALERTA COMUNITÁRIO</h1></div>
+                        <p class="text-sm mt-2">Membros do bairro recebem notificações em tempo real</p>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <div class="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                            <h2 class="font-bold mb-3"><i class="fas fa-paper-plane text-green-400"></i> NOVO ALERTA LOCAL</h2>
+                            <select id="comunidade-select" class="w-full bg-gray-800 border border-gray-700 rounded-lg p-2 mb-3 text-sm">
+                                <option value="Mutuáli">🏘️ Bairro Mutuáli</option>
+                                <option value="Namutequeliua">🏘️ Namutequeliua</option>
+                                <option value="Condomínio Riverside">🏢 Condomínio Riverside</option>
+                                <option value="Natikiri">🌳 Natikiri</option>
+                                <option value="Centro Nampula">🏙️ Centro</option>
+                            </select>
+                            <div class="grid grid-cols-3 gap-2">
+                                <button onclick="window.enviarAlertaComunidade('roubo')" class="bg-red-800 hover:bg-red-700 p-2 rounded text-sm"><i class="fas fa-mask"></i> Roubo</button>
+                                <button onclick="window.enviarAlertaComunidade('incendio')" class="bg-orange-800 hover:bg-orange-700 p-2 rounded text-sm"><i class="fas fa-fire"></i> Incêndio</button>
+                                <button onclick="window.enviarAlertaComunidade('acidente')" class="bg-yellow-800 hover:bg-yellow-700 p-2 rounded text-sm"><i class="fas fa-car-crash"></i> Acidente</button>
+                            </div>
+                        </div>
+                        <div class="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                            <h2 class="font-bold mb-2"><i class="fas fa-comments text-green-400"></i> FEED DA COMUNIDADE</h2>
+                            <div id="feed-comunidade" class="h-64 overflow-y-auto bg-black/30 rounded-lg p-2 text-xs space-y-1">
+                                <p class="text-green-300"><i class="fas fa-info-circle"></i> Canal comunitário ativo</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-5 bg-gray-800/50 rounded-xl p-4">
+                        <h3 class="text-sm font-bold">🚨 Alertas ativos na comunidade</h3>
+                        <div class="mt-2 space-y-2 max-h-40 overflow-y-auto">
+                            ${alertasComunidade.length === 0 ? '<p class="text-gray-500 text-sm">Nenhum alerta ativo na sua região</p>' : alertasComunidade.map(a => `
+                                <div class="bg-red-950/40 border-l-4 border-red-500 p-2 rounded">
+                                    <span class="font-bold">${a.tipo.toUpperCase()}</span> - ${a.local}
+                                    <span class="text-[10px] block text-gray-400">${new Date(a.timestamp).toLocaleTimeString()}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ==================== NAVEGAÇÃO ENTRE ABAS ====================
+        function mudarAba(abaId) {
+            currentTab = abaId;
+            const mainEl = document.getElementById('main-content');
+            if (abaId === 'dashboard') {
+                mainEl.innerHTML = renderDashboard();
+                setTimeout(() => {
+                    initMapa();
+                    // Reexibir todos os marcadores dos alertas pendentes
+                    alertasAtivos.filter(a => a.status === 'pendente').forEach(a => {
+                        adicionarMarcadorAlerta(a.tipo, a.local, a.lat, a.lng, a.comunidade);
+                    });
+                }, 100);
+            } else if (abaId === 'policia') mainEl.innerHTML = renderDepartamento('roubo', 'POLÍCIA NACIONAL', 'fas fa-shield-alt', 'red', 'from-red-950 to-red-900');
+            else if (abaId === 'bombeiros') mainEl.innerHTML = renderDepartamento('incendio', 'CORPO DE BOMBEIROS', 'fas fa-fire-extinguisher', 'orange', 'from-orange-950 to-orange-900');
+            else if (abaId === 'samu') mainEl.innerHTML = renderDepartamento('acidente', 'SAMU · RESGATE', 'fas fa-ambulance', 'yellow', 'from-yellow-950 to-yellow-900');
+            else if (abaId === 'comunidade') mainEl.innerHTML = renderComunidade();
+
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                if (btn.dataset.tab === abaId) btn.classList.add('tab-active');
+                else btn.classList.remove('tab-active');
+            });
+            atualizarTodosOsComponentes();
+        }
+
+        // ==================== EXPOR FUNÇÕES GLOBAIS ====================
+        window.enviarAlerta = (tipo) => criarAlerta(tipo, "ESP Botão");
+        window.enviarAlertaComunidade = enviarAlertaComunidade;
+        window.atenderAlerta = atenderAlerta;
+        window.atenderPorDepartamento = atenderPorDepartamento;
+        window.resetarSistemaGeral = resetarSistemaGeral;
+        window.limparFirebaseAlertas = limparFirebaseAlertas;
+        window.mudarAba = mudarAba;
+
+        // ==================== INICIALIZAÇÃO ====================
+        document.addEventListener('DOMContentLoaded', () => {
+            mudarAba('dashboard');
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => mudarAba(btn.dataset.tab));
+            });
+            iniciarEscutaFirebase();
+            document.getElementById('firebase-status').innerHTML = '🔥 Firebase Online';
+            document.getElementById('firebase-status').className = 'text-green-400 bg-green-950/40 px-2 py-0.5 rounded-full';
+        });
+
+        setInterval(() => {
+            const rel = document.getElementById('relogio');
+            if (rel) rel.innerText = new Date().toLocaleTimeString('pt-BR');
+        }, 1000);
+        setInterval(() => { atualizarU8G2Display(); }, 500);
+    </script>
+</body>
+</html>
